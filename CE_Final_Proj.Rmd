@@ -1,0 +1,169 @@
+---
+title: "Chris Erickson Final Proj"
+author: "Chris Erickson "
+date: "May 1, 2017"
+output: html_document
+---
+
+This project analyzes the differential expression of master transcription factors, as well as major markers of chondrogenic differentiation of select cells within the growth plate cartilage. RNAseq data was obtained from GSM1975232, in which growth plate chondrocytes were isolated from mouse and run on an Illumina platform. Cells for this project were selected based on their Collagen10 expression, a variable marker of chondrocyte differentiaion. Eight cells were selected with low and high Collagen10 expression to represent progenitor and fully differentiated chondrocyte populations, respectively. RNAseq data from each cell was analyzed using kallisto via the instructions provided below. 
+
+```{bash, eval = FALSE}
+set -u -x -e -o pipefail
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+First, import transcriptome reference and fastq files.
+
+```{bash, eval = FALSE}
+#for highest 8 Col10 expressing cells
+for i in (34:41)
+    SRR30331$i_1.fastq.gz; do fastq-dump -A $i ; 
+    done
+#for lowest 8 col10 expressing cells
+for i in (25:32)
+    SRR30329$i_1.fastq.gz; do fastq-dump -A $i ;
+    done
+```
+
+Second, define variables and directories
+```{bash, eval = FALSE}
+home_dir="$HOME/Genome_Class/final_proj/rna-seq"
+fasta="$home_dir/dbases/Mus_musculus.GRCm38.cdna.all.fa.gz"
+fastqs="$home_dir/fastqs/"
+```
+
+Third, use kallisto to build index with reference transcriptome fasta
+```{bash, eval = FALSE}
+kallisto index -i $home_dir"/dbases/kallisto.idx" $fasta
+```
+
+Lastly, use kallisto to estimate the transcript counts per million of the fastq files
+```{bash, eval = FALSE}
+mkdir -p kallisto
+ 
+for fastq in "$fastqs"*.fastq.gz
+do
+   echo "psuedoaligning "$fastq "with kallisto"
+ 
+   outname=$(basename $fastq)
+   outname=${outname/.fastq.gz/}
+ 
+   kallisto quant --single \
+       -l 252 \ 
+       -s 50 \
+       -i $dir"/dbases/kallisto.idx" \
+       -o "kallisto/"$outname \
+       -b 5 \ 
+        --rf-stranded \
+        $fastq
+done
+```
+
+## Basic Differential Expression analysis with Sleuth
+
+Now that we have our transcriptome counts from the kallisto package, we can visualize it using the sleuth package in RStudio. Load sleuth package.
+```{r, eval=FALSE}
+library(tidyverse)
+source("http://bioconductor.org/biocLite.R")
+biocLite("rhdf5")
+install.packages("devtools")
+devtools::install_github("pachterlab/sleuth")
+library("sleuth")
+```
+
+First, make a data table with the transcript reads, and link kallisto directories with samples.
+```{r meta_data, eval=FALSE}
+library(dplyr)
+base_dir <- "~/Genome_Class/final_proj/rna-seq/" #pathing rna_seq directory
+sample_id <- dir(file.path(base_dir, "kallisto")) #pathing to the kallisto directory
+paths <- dir(file.path(base_dir, "kallisto"), full.names = T) #pathing the kallistoed files
+conditions <- c(rep("lo", 3), rep("hi", 3)) #Matching kallistoed files to Col10
+# Putting it all together.
+meta_data <- data_frame(sample = sample_id, 
+               condition = conditions,
+               path = paths)
+meta_data
+```
+
+Second, need to generate the sleuth object, and import and normalize the data.
+```{r read_in_data, eval=FALSE}
+my_sloth <- sleuth_prep(meta_data, ~condition ) #Loading kallistoed data into sleuth
+```
+
+```{r fit_models, eval=FALSE}
+my_sloth <- sleuth_fit(my_sloth) #Estimating paramaters for full model
+my_sloth <- sleuth_fit(my_sloth, ~1, 'reduced') #Parameters for reduced moedel
+```
+
+```{r perform_stats, eval=FALSE}
+my_sloth <- sleuth_lrt(my_sloth, 'reduced', 'full') #Differential analysis
+```
+
+```{r report_results, eval=FALSE} 
+res <- sleuth_results(my_sloth, "reduced:full", test_type = "lrt")
+res <- as_data_frame(res)
+res #Original sleuth
+```
+
+Now that we have sleuthed, we can add the gene id information to the sleuth from Ensembl using bioMart.
+```{r, eval=FALSE}
+#source("http://bioconductor.org/biocLite.R")
+biocLite("biomaRt")
+
+#Collect gene names from Ensembl
+mart <- biomaRt::useMart(biomart = "ENSEMBL_MART_ENSEMBL",
+  dataset = "mmusculus_gene_ensembl",
+  host = 'ensembl.org')
+
+#Add gene names to the sleuth table
+t2g <- biomaRt::getBM(attributes = c("ensembl_transcript_id", "ensembl_gene_id",
+    "external_gene_name"), mart = mart)
+t2g <- dplyr::rename(t2g, target_id = ensembl_transcript_id,
+  ens_gene = ensembl_gene_id, ext_gene = external_gene_name)
+my_newsloth <- sleuth_prep(meta_data, ~ condition, target_mapping = t2g)
+```
+
+We can now have sleuth object with the gene name.
+```{r, eval=FALSE}
+so <- sleuth_fit(my_newsloth)
+so <- sleuth_fit(so, ~1, 'reduced')
+so <- sleuth_lrt(so, 'reduced', 'full')
+
+results_table <- sleuth_results(so, 'reduced:full', test_type = 'lrt')
+results_table <- as_data_frame(results_table)
+results_table #Sleuth with gene names
+```
+
+Can also view as gene aggregation.
+```{r, eval=FALSE}
+sowhat <- sleuth_prep(meta_data, ~condition, target_mapping = t2g,
+  aggregation_column = 'ext_gene')
+sowhat <- sleuth_fit(sowhat)
+sowhat <- sleuth_fit(sowhat, ~1, 'reduced')
+sowhat <- sleuth_lrt(sowhat, 'reduced', 'full')
+
+agg_table <- sleuth_results(sowhat, 'reduced:full', test_type = 'lrt')
+agg_table <- as_data_frame(agg_table)
+agg_table
+
+```
+
+To view results in a shiny webpage for exploratory analysis, use sleuth_live
+```{r, eval=FALSE}
+sleuth_live(so) 
+```
+
+Make some summary statistic results
+```{r, eval=FALSE}
+library(ggplot2)
+hi10 <- head(arrange(results_table, pval), 10) %>% select(ext_gene)
+lo10 <- head(arrange(results_table, desc(pval)), 10) %>% select(ext_gene)
+```
+
+
+
+
+
